@@ -4,12 +4,13 @@ const assert = std.debug.assert;
 
 const Coyote = @import("coyote-pool");
 
-const triangle_num: u64 = 30000000;
+const triangle_num: u64 = 3000000000;
 const num_additions_per_task = 2000000;
 const num_tasks = (triangle_num) / (num_additions_per_task);
 
 pub fn main() void {
     var pool = Coyote.Pool.init(8);
+    defer pool.deinit();
 
     var subsets: []NumberSubset = Coyote.allocator.alloc(NumberSubset, num_tasks) catch unreachable;
 
@@ -23,6 +24,8 @@ pub fn main() void {
         _ = pool.add_work(&addNumberSubset, @ptrCast(*anyopaque, &subsets[i]));
     }
 
+    pool.pause();
+    pool._resume();
     pool.wait();
 
     i = 0;
@@ -31,9 +34,9 @@ pub fn main() void {
         result += subsets[i].total;
     }
     elapsed = std.time.milliTimestamp() - elapsed;
-    std.log.info("triangle: {} result: {} elapsed: {}ms", .{ (triangle_num * (triangle_num + 1) / 2), result, elapsed});
+    log.info("triangle: {} result: {} elapsed: {}ms", .{ (triangle_num * (triangle_num + 1) / 2), result, elapsed});
 
-    pool.destroy();
+    
 }
 
 const NumberSubset = struct {

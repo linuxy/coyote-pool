@@ -52,6 +52,12 @@ pub extern fn pthread_detach(__th: pthread_t) c_int;
 const __SIZEOF_PTHREAD_COND_T = 48;
 const __SIZEOF_PTHREAD_MUTEX_T = 40;
 
+var sigact = std.os.Sigaction{
+    .handler = .{.sigaction = thread_hold },
+    .mask = std.os.empty_sigset,
+    .flags = 0,
+};
+
 pub const Semaphore = struct {
     mutex: pthread_mutex_t,
     cond: pthread_cond_t,
@@ -178,6 +184,15 @@ pub const JobQueue = struct {
     }
 };
 
+pub fn thread_hold(sig: i32, sig_info: *const std.os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) void {
+    _ = sig;
+    _ = sig_info;
+    _ = ctx_ptr;
+    threads_on_hold = 1;
+    while(threads_on_hold > 0)
+        std.os.nanosleep(0, 1);
+}
+
 pub const Thread = struct {
     id: u32,
     pool: *Pool,
@@ -187,17 +202,10 @@ pub const Thread = struct {
         self.pool = pool;
         self.id = id;
 
-        std.log.info("Creating thread ID: {}", .{self.id});
+        //std.log.info("Creating thread ID: {}", .{self.id});
         _ = pthread_create(&self.pthread, null, do, self);
         _ = pthread_detach(self.pthread);
         return self;
-    }
-
-    pub fn hold(sig_id: u32) void {
-        _ = sig_id;
-        threads_on_hold = 1;
-        while(threads_on_hold > 0)
-            std.time.nanosleep(1);
     }
 
     pub fn destroy(self: *Thread) void {
@@ -209,6 +217,7 @@ pub fn do(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
     var self = @ptrCast(*Thread, @alignCast(@alignOf(Thread), arg));
     
     std.log.info("Working on thread ID: {}", .{std.Thread.getCurrentId()});
+    std.os.sigaction(std.os.SIG.USR1, &sigact, null) catch unreachable;
 
     //Mark as alive
     _ = pthread_mutex_lock(&self.*.pool.*.thread_count_lock);
@@ -307,7 +316,7 @@ pub const Pool = struct {
         _ = pthread_mutex_unlock(&self.thread_count_lock);
     }
 
-    pub fn destroy(self: *Pool) void {
+    pub fn deinit(self: *Pool) void {
         threads_keepalive = 0;
 
         var time_elapsed = std.time.milliTimestamp();
@@ -332,8 +341,9 @@ pub const Pool = struct {
     pub fn pause(self: *Pool) void {
         var n: u32 = 0;
         while(n < self.num_threads_alive) : (n += 1) {
-            _ = pthread_kill(self.*.threads[n].*.pthread, .SIGUSR1);
+            _ = pthread_kill(self.*.threads[n].pthread, std.os.SIG.USR1);
         }
+        std.os.nanosleep(0, 1);
     }
 
     pub fn _resume(self: *Pool) void {
