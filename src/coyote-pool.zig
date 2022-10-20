@@ -4,7 +4,7 @@ const c = std.c;
 var threads_keepalive: u32 = undefined;
 var threads_on_hold: u32 = undefined;
 
-var allocator = std.heap.c_allocator;
+pub var allocator = std.heap.c_allocator;
 
 pub const pthread_t = c_ulong;
 
@@ -98,7 +98,7 @@ pub const Semaphore = struct {
 
 pub const Job = struct {
     prev: ?*Job,
-    func: *const fn(*anyopaque) void,
+    func: *const fn (*anyopaque) void,
     arg: *anyopaque,
 };
 
@@ -235,7 +235,6 @@ pub fn do(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
             self.*.pool.*.num_threads_working -= 1;
             if (self.*.pool.*.num_threads_working < 1) {
                 _ = pthread_cond_signal(&self.*.pool.*.threads_idle);
-                std.log.info("Threads all idle.", .{});
             }
             _ = pthread_mutex_unlock(&self.*.pool.*.thread_count_lock);
         }
@@ -289,7 +288,7 @@ pub const Pool = struct {
         return pool;
     }
 
-    pub fn add_work(self: *Pool, func: *const fn(*anyopaque) void, arg: *anyopaque) u32 {
+    pub fn add_work(self: *Pool, func: anytype, arg: anytype) u32 {
         var newjob: *Job = allocator.create(Job) catch unreachable;
 
         newjob.*.func = func;
