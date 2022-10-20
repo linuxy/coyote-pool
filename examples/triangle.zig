@@ -5,7 +5,7 @@ const assert = std.debug.assert;
 const Coyote = @import("coyote-pool");
 
 const triangle_num: u64 = 30000000;
-const num_additions_per_task = 2000;
+const num_additions_per_task = 2000000;
 const num_tasks = (triangle_num) / (num_additions_per_task);
 
 pub fn main() void {
@@ -22,8 +22,8 @@ pub fn main() void {
         next = subsets[i].end + 1;
         _ = pool.add_work(&addNumberSubset, @ptrCast(*anyopaque, &subsets[i]));
     }
+
     pool.wait();
-    pool.destroy();
 
     i = 0;
     var result: u64 = 0;
@@ -33,6 +33,7 @@ pub fn main() void {
     elapsed = std.time.milliTimestamp() - elapsed;
     std.log.info("triangle: {} result: {} elapsed: {}ms", .{ (triangle_num * (triangle_num + 1) / 2), result, elapsed});
 
+    pool.destroy();
 }
 
 const NumberSubset = struct {
