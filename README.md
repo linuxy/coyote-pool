@@ -1,5 +1,5 @@
 # coyote-pool
-A thread pool for pthreads written in Zig
+A thread pool written in Zig
 
 Builds against zig 0.10.0+
 
