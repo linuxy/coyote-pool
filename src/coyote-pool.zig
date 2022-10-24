@@ -102,87 +102,92 @@ pub const Semaphore = struct {
     }
 };
 
-pub const Job = struct {
-    prev: ?*Job,
-    func: *const fn (*anyopaque) void,
-    arg: *anyopaque,
-};
+pub fn Job(comptime Func: anytype) type {
+    return struct {
+        prev: ?*Job(Func),
+        arg: std.meta.ArgsTuple(@TypeOf(Func)) = undefined,
+    };
+}
 
-pub const JobQueue = struct {
-    rwmutex: pthread_mutex_t,
-    front: ?*Job,
-    rear: ?*Job,
-    has_jobs: *Semaphore,
-    len: ?i32,
+pub fn JobQueue(comptime Func: anytype) type {
+    return struct {
+        const Self = @This();
 
-    pub fn init() *JobQueue {
-        var queue = allocator.create(JobQueue) catch unreachable;
-        queue.*.len.? = 0;
-        queue.*.front = null;
-        queue.*.rear = null;
+        rwmutex: pthread_mutex_t,
+        front: ?*Job(Func),
+        rear: ?*Job(Func),
+        has_jobs: *Semaphore,
+        len: ?i32,
 
-        queue.*.has_jobs = allocator.create(Semaphore) catch unreachable;
-        _ = pthread_mutex_init(&queue.*.rwmutex, null);
-        queue.*.has_jobs.init(0);
+        pub fn init() *Self {
+            var queue = allocator.create(Self) catch unreachable;
+            queue.*.len.? = 0;
+            queue.*.front = null;
+            queue.*.rear = null;
 
-        return queue;
-    }
+            queue.*.has_jobs = allocator.create(Semaphore) catch unreachable;
+            _ = pthread_mutex_init(&queue.*.rwmutex, null);
+            queue.*.has_jobs.init(0);
 
-    pub fn clear(self: *JobQueue) void {
-        while(self.*.len.? > 0)
-            allocator.destroy(self.pull().?);
-
-        self.*.front = null;
-        self.*.rear = null;
-        self.*.has_jobs.reset();
-        self.*.len = 0;
-    }
-
-    pub fn push(self: *JobQueue, newjob: ?*Job) void {
-        _ = pthread_mutex_lock(&self.*.rwmutex);
-        newjob.?.prev = null;
-
-        switch(self.*.len.?) {
-            0 => {
-                self.*.front = newjob;
-                self.*.rear = newjob;
-            },
-            else => {
-                self.*.rear.?.prev = newjob;
-                self.*.rear = newjob;
-            }
+            return queue;
         }
-        self.*.len.? += 1;
-        self.*.has_jobs.*.post();
-        _ = pthread_mutex_unlock(&self.*.rwmutex);
-    }
 
-    pub fn pull(self: *JobQueue) ?*Job {
-        _ = pthread_mutex_lock(&self.*.rwmutex);
-        var job = self.*.front;
+        pub fn clear(self: *Self) void {
+            while(self.*.len.? > 0)
+                allocator.destroy(self.pull().?);
 
-        switch(self.*.len.?) {
-            0 => {},
-            1 => {
-                self.*.front = null;
-                self.*.rear = null;
-                self.*.len = 0;
-            },
-            else => {
-                self.*.front = job.?.prev;
-                self.*.len.? -= 1;
-                self.*.has_jobs.post();
-            }
+            self.*.front = null;
+            self.*.rear = null;
+            self.*.has_jobs.reset();
+            self.*.len = 0;
         }
-        _ = pthread_mutex_unlock(&self.*.rwmutex);
-        return job;
-    }
 
-    pub fn destroy(self: *JobQueue) void {
-        self.clear();
-        allocator.destroy(self.*.has_jobs);
-    }
-};
+        pub fn push(self: *Self, newjob: ?*Job(Func)) void {
+            _ = pthread_mutex_lock(&self.*.rwmutex);
+            newjob.?.prev = null;
+
+            switch(self.*.len.?) {
+                0 => {
+                    self.*.front = newjob;
+                    self.*.rear = newjob;
+                },
+                else => {
+                    self.*.rear.?.prev = newjob;
+                    self.*.rear = newjob;
+                }
+            }
+            self.*.len.? += 1;
+            self.*.has_jobs.*.post();
+            _ = pthread_mutex_unlock(&self.*.rwmutex);
+        }
+
+        pub fn pull(self: *Self) ?*Job(Func) {
+            _ = pthread_mutex_lock(&self.*.rwmutex);
+            var job = self.*.front;
+
+            switch(self.*.len.?) {
+                0 => {},
+                1 => {
+                    self.*.front = null;
+                    self.*.rear = null;
+                    self.*.len = 0;
+                },
+                else => {
+                    self.*.front = job.?.prev;
+                    self.*.len.? -= 1;
+                    self.*.has_jobs.post();
+                }
+            }
+            _ = pthread_mutex_unlock(&self.*.rwmutex);
+            return job;
+        }
+
+        pub fn destroy(self: *Self) void {
+            self.clear();
+            allocator.destroy(self.*.has_jobs);
+        }
+    };
+}
 
 pub fn thread_hold(sig: i32, sig_info: *const std.os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) void {
     _ = sig;
@@ -262,7 +267,7 @@ pub const Pool = struct {
     num_threads_working: u32,
     thread_count_lock: pthread_mutex_t, 
     threads_idle: pthread_cond_t,
-    jobqueue: *JobQueue,
+    jobqueue: []*anyopaque,
 
     pub fn init(num_threads: u32) *Pool {
         threads_on_hold = 0;
@@ -277,7 +282,7 @@ pub const Pool = struct {
         pool.*.num_threads_working = 0;
 
         //Create job queue
-        pool.*.jobqueue = JobQueue.init();
+        //pool.*.jobqueue = JobQueue.init();
 
         //Create threads
         pool.*.threads = allocator.alloc(Thread, num_threads) catch unreachable;
@@ -297,8 +302,8 @@ pub const Pool = struct {
         return pool;
     }
 
-    pub fn add_work(self: *Pool, func: anytype, arg: anytype) u32 {
-        var newjob: *Job = allocator.create(Job) catch unreachable;
+    pub fn add_work(self: *Pool, comptime func: anytype, arg: anytype) u32 {
+        var newjob: *Job(func) = allocator.create(Job(func)) catch unreachable;
 
         newjob.*.func = func;
         newjob.*.arg = arg;
@@ -341,7 +346,7 @@ pub const Pool = struct {
     pub fn pause(self: *Pool) void {
         var n: u32 = 0;
         while(n < self.num_threads_alive) : (n += 1) {
-            _ = pthread_kill(self.*.threads[n].pthread, std.os.SIG.USR1);
+            _ = pthread_kill(self.*.threads[n].pthread, std.os.SIG.INT);
         }
         std.os.nanosleep(0, 1);
     }

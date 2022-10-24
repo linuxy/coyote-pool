@@ -21,7 +21,7 @@ pub fn main() void {
         subsets[i].start = next;
         subsets[i].end = subsets[i].start + num_additions_per_task - 1;
         next = subsets[i].end + 1;
-        _ = pool.add_work(&addNumberSubset, @ptrCast(*anyopaque, &subsets[i]));
+        _ = pool.add_work(&addNumberSubset, &subsets[i]); //@ptrCast(*anyopaque, &subsets[i]));
     }
 
     pool.pause();
@@ -45,8 +45,8 @@ const NumberSubset = struct {
     total: u64,
 };
 
-pub fn addNumberSubset(arg: *anyopaque) void {
-    var subset = @ptrCast(*NumberSubset, @alignCast(@alignOf(NumberSubset), arg));
+pub fn addNumberSubset(subset: *NumberSubset) void {
+    //var subset = @ptrCast(*NumberSubset, @alignCast(@alignOf(NumberSubset), arg));
     subset.total = 0;
     while (subset.start <= subset.end) : (subset.start += 1) {
         subset.total += subset.start + 1;
