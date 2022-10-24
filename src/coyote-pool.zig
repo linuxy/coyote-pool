@@ -6,61 +6,9 @@ var threads_on_hold: u32 = undefined;
 
 pub var allocator = std.heap.c_allocator;
 
-pub const pthread_t = c_ulong;
-
-pub const pthread_mutex_t = extern struct {
-    size: [__SIZEOF_PTHREAD_MUTEX_T]u8 align(@alignOf(usize)) = [_]u8{0} ** __SIZEOF_PTHREAD_MUTEX_T,
-};
-
-pub const pthread_cond_t = extern struct {
-    size: [__SIZEOF_PTHREAD_COND_T]u8 align(@alignOf(usize)) = [_]u8{0} ** __SIZEOF_PTHREAD_COND_T,
-};
-
-pub const pthread_rwlock_t = extern struct {
-    size: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
-};
-
-pub const pthread_condattr_t = extern union {
-    __size: [4]u8,
-    __align: c_int,
-};
-
-pub const pthread_mutexattr_t = extern union {
-    __size: [4]u8,
-    __align: c_int,
-};
-
-pub const union_pthread_attr_t = extern union {
-    __size: [56]u8,
-    __align: c_long,
-};
-pub const pthread_attr_t = union_pthread_attr_t;
-
-pub extern fn pthread_mutex_init(__mutex: [*c]pthread_mutex_t, __mutexattr: [*c]const pthread_mutexattr_t) c_int;
-pub extern fn pthread_cond_init(noalias __cond: [*c]pthread_cond_t, noalias __cond_attr: [*c]const pthread_condattr_t) c_int;
-pub extern fn pthread_mutex_lock(__mutex: [*c]pthread_mutex_t) c_int;
-pub extern fn pthread_mutex_unlock(__mutex: [*c]pthread_mutex_t) c_int;
-pub extern fn pthread_kill(__threadid: pthread_t, __signo: c_int) c_int;
-pub extern fn pthread_cond_wait(noalias __cond: [*c]pthread_cond_t, noalias __mutex: [*c]pthread_mutex_t) c_int;
-pub extern fn pthread_cond_signal(__cond: [*c]pthread_cond_t) c_int;
-pub extern fn pthread_cond_broadcast(__cond: [*c]pthread_cond_t) c_int;
-pub extern fn pthread_create(noalias __newthread: [*c]pthread_t, noalias __attr: [*c]const pthread_attr_t, __start_routine: ?*const fn (?*anyopaque) callconv(.C) ?*anyopaque, noalias __arg: ?*anyopaque) c_int;
-pub extern fn pthread_exit(__retval: ?*anyopaque) noreturn;
-pub extern fn pthread_join(__th: pthread_t, __thread_return: [*c]?*anyopaque) c_int;
-pub extern fn pthread_detach(__th: pthread_t) c_int;
-
-const __SIZEOF_PTHREAD_COND_T = 48;
-const __SIZEOF_PTHREAD_MUTEX_T = 40;
-
-var sigact = std.os.Sigaction{
-    .handler = .{.sigaction = thread_hold },
-    .mask = std.os.empty_sigset,
-    .flags = 0,
-};
-
 pub const Semaphore = struct {
-    mutex: pthread_mutex_t,
-    cond: pthread_cond_t,
+    mutex: std.Thread.Mutex,
+    cond: std.Thread.Condition,
     v: u32,
 
     pub fn init(self: *Semaphore, value: u32) void {
@@ -68,8 +16,9 @@ pub const Semaphore = struct {
             std.log.warn("Semaphore.init(): Semaphore can only take values 1 or 0", .{});
             std.os.exit(1);
         }
-        _ = pthread_mutex_init(&self.*.mutex, null);
-        _ = pthread_cond_init(&self.*.cond, null);
+        
+        self.mutex = std.Thread.Mutex{};
+        self.cond = std.Thread.Condition{};
         self.*.v = value;
     }
 
@@ -78,27 +27,27 @@ pub const Semaphore = struct {
     }
 
     pub fn post(self: *Semaphore) void {
-        _ = pthread_mutex_lock(&self.*.mutex);
+        self.mutex.lock();
         self.*.v = 1;
-        _ = pthread_cond_signal(&self.*.cond);
-        _ = pthread_mutex_unlock(&self.*.mutex);
+        self.cond.signal();
+        self.mutex.unlock();
     }
 
     pub fn post_all(self: *Semaphore) void {
-        _ = pthread_mutex_lock(&self.*.mutex);
+        self.mutex.lock();
         self.*.v = 1;
-        _ = pthread_cond_broadcast(&self.*.cond);
-        _ = pthread_mutex_unlock(&self.*.mutex);
+        self.cond.broadcast();
+        self.mutex.unlock();
     }
 
     pub fn wait(self: *Semaphore) void {
-        _ = pthread_mutex_lock(&self.*.mutex);
+        self.mutex.lock();
         while(self.*.v != 1)
-            _ = pthread_cond_wait(&self.*.cond, &self.*.mutex);
+            self.cond.wait(&self.mutex);
 
         self.*.v = 0;
-        _ = pthread_cond_signal(&self.*.cond);
-        _ = pthread_mutex_unlock(&self.*.mutex);
+        self.cond.signal();
+        self.mutex.unlock();
     }
 };
 
@@ -109,7 +58,7 @@ pub const Job = struct {
 };
 
 pub const JobQueue = struct {
-    rwmutex: pthread_mutex_t,
+    rwmutex: std.Thread.Mutex,
     front: ?*Job,
     rear: ?*Job,
     has_jobs: *Semaphore,
@@ -122,7 +71,7 @@ pub const JobQueue = struct {
         queue.*.rear = null;
 
         queue.*.has_jobs = allocator.create(Semaphore) catch unreachable;
-        _ = pthread_mutex_init(&queue.*.rwmutex, null);
+        queue.*.rwmutex = std.Thread.Mutex{};
         queue.*.has_jobs.init(0);
 
         return queue;
@@ -139,7 +88,7 @@ pub const JobQueue = struct {
     }
 
     pub fn push(self: *JobQueue, newjob: ?*Job) void {
-        _ = pthread_mutex_lock(&self.*.rwmutex);
+        self.*.rwmutex.lock();
         newjob.?.prev = null;
 
         switch(self.*.len.?) {
@@ -154,11 +103,11 @@ pub const JobQueue = struct {
         }
         self.*.len.? += 1;
         self.*.has_jobs.*.post();
-        _ = pthread_mutex_unlock(&self.*.rwmutex);
+        self.*.rwmutex.unlock();
     }
 
     pub fn pull(self: *JobQueue) ?*Job {
-        _ = pthread_mutex_lock(&self.*.rwmutex);
+        self.*.rwmutex.lock();
         var job = self.*.front;
 
         switch(self.*.len.?) {
@@ -174,7 +123,7 @@ pub const JobQueue = struct {
                 self.*.has_jobs.post();
             }
         }
-        _ = pthread_mutex_unlock(&self.*.rwmutex);
+        self.*.rwmutex.unlock();
         return job;
     }
 
@@ -190,21 +139,21 @@ pub fn thread_hold(sig: i32, sig_info: *const std.os.siginfo_t, ctx_ptr: ?*const
     _ = ctx_ptr;
     threads_on_hold = 1;
     while(threads_on_hold > 0)
-        std.os.nanosleep(0, 1);
+        std.time.sleep(0);
 }
 
 pub const Thread = struct {
     id: u32,
     pool: *Pool,
-    pthread: pthread_t,
+    pthread: std.Thread,
 
     pub fn init(self: *Thread, pool: *Pool, id: u32) *Thread {
         self.pool = pool;
         self.id = id;
 
         //std.log.info("Creating thread ID: {}", .{self.id});
-        _ = pthread_create(&self.pthread, null, do, self);
-        _ = pthread_detach(self.pthread);
+        self.pthread = std.Thread.spawn(.{}, do, .{self}) catch unreachable;
+        self.pthread.detach();
         return self;
     }
 
@@ -213,26 +162,28 @@ pub const Thread = struct {
     }
 };
 
-pub fn do(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
+pub fn do(arg: ?*anyopaque) callconv(.C) void {
     var self = @ptrCast(*Thread, @alignCast(@alignOf(Thread), arg));
     
     std.log.info("Working on thread ID: {}", .{std.Thread.getCurrentId()});
-    std.os.sigaction(std.os.SIG.USR1, &sigact, null) catch unreachable;
 
     //Mark as alive
-    _ = pthread_mutex_lock(&self.*.pool.*.thread_count_lock);
+    self.*.pool.*.thread_count_lock.lock();
     self.*.pool.*.num_threads_alive += 1;
-    _ = pthread_mutex_unlock(&self.*.pool.*.thread_count_lock);
+    self.*.pool.*.thread_count_lock.unlock();
 
     while(threads_keepalive > 0) {
+        while(threads_on_hold > 0)
+            std.time.sleep(0);
+        
         self.*.pool.*.jobqueue.*.has_jobs.wait();
 
         if(threads_keepalive > 0) {
 
             //Mark as working
-            _ = pthread_mutex_lock(&self.*.pool.*.thread_count_lock);
+            self.*.pool.*.thread_count_lock.lock();
             self.*.pool.*.num_threads_working += 1;
-            _ = pthread_mutex_unlock(&self.*.pool.*.thread_count_lock);
+            self.*.pool.*.thread_count_lock.unlock();
 
             var job = self.*.pool.*.jobqueue.pull();
             if(job != null) {
@@ -240,28 +191,26 @@ pub fn do(arg: ?*anyopaque) callconv(.C) ?*anyopaque {
                 allocator.destroy(job.?);
             }
             //Finish working
-            _ = pthread_mutex_lock(&self.*.pool.*.thread_count_lock);
+            self.*.pool.*.thread_count_lock.lock();
             self.*.pool.*.num_threads_working -= 1;
             if (self.*.pool.*.num_threads_working < 1) {
-                _ = pthread_cond_signal(&self.*.pool.*.threads_idle);
+                self.*.pool.*.threads_idle.signal();
             }
-            _ = pthread_mutex_unlock(&self.*.pool.*.thread_count_lock);
+            self.*.pool.*.thread_count_lock.unlock();
         }
     }
 
-    _ = pthread_mutex_lock(&self.*.pool.*.thread_count_lock);
+    self.*.pool.*.thread_count_lock.lock();
     self.*.pool.*.num_threads_alive -= 1;
-    _ = pthread_mutex_unlock(&self.*.pool.*.thread_count_lock);
-
-    return null;
+    self.*.pool.*.thread_count_lock.unlock();
 }
 
 pub const Pool = struct {
     threads: []Thread,
     num_threads_alive: u32,
     num_threads_working: u32,
-    thread_count_lock: pthread_mutex_t, 
-    threads_idle: pthread_cond_t,
+    thread_count_lock: std.Thread.Mutex, 
+    threads_idle: std.Thread.Condition,
     jobqueue: *JobQueue,
 
     pub fn init(num_threads: u32) *Pool {
@@ -282,8 +231,8 @@ pub const Pool = struct {
         //Create threads
         pool.*.threads = allocator.alloc(Thread, num_threads) catch unreachable;
 
-        _ = pthread_mutex_init(&pool.*.thread_count_lock, null);
-        _ = pthread_cond_init(&pool.*.threads_idle, null);
+        pool.*.thread_count_lock = std.Thread.Mutex{};
+        pool.*.threads_idle = std.Thread.Condition{};
 
         var n: u32 = 0;
         while(n < num_threads) : (n += 1) {
@@ -309,11 +258,11 @@ pub const Pool = struct {
     }
 
     pub fn wait(self: *Pool) void {
-        _ = pthread_mutex_lock(&self.thread_count_lock);
+        self.thread_count_lock.lock();
         while(self.*.jobqueue.len.? > 0 or self.*.num_threads_working > 0) {
-            _ = pthread_cond_wait(&self.threads_idle, &self.thread_count_lock);
+            self.threads_idle.wait(&self.thread_count_lock);
         }
-        _ = pthread_mutex_unlock(&self.thread_count_lock);
+        self.thread_count_lock.unlock();
     }
 
     pub fn deinit(self: *Pool) void {
@@ -329,7 +278,7 @@ pub const Pool = struct {
 
         while(self.num_threads_alive > 0) {
             self.jobqueue.has_jobs.post_all();
-            std.os.nanosleep(0, 1);
+            std.time.sleep(0);
         }
 
         self.jobqueue.destroy();
@@ -339,11 +288,8 @@ pub const Pool = struct {
     }
 
     pub fn pause(self: *Pool) void {
-        var n: u32 = 0;
-        while(n < self.num_threads_alive) : (n += 1) {
-            _ = pthread_kill(self.*.threads[n].pthread, std.os.SIG.USR1);
-        }
-        std.os.nanosleep(0, 1);
+        threads_on_hold = 1;
+        _ = self;
     }
 
     pub fn _resume(self: *Pool) void {
