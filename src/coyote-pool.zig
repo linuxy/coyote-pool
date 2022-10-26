@@ -133,15 +133,6 @@ pub const JobQueue = struct {
     }
 };
 
-pub fn thread_hold(sig: i32, sig_info: *const std.os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) void {
-    _ = sig;
-    _ = sig_info;
-    _ = ctx_ptr;
-    threads_on_hold = 1;
-    while(threads_on_hold > 0)
-        std.time.sleep(0);
-}
-
 pub const Thread = struct {
     id: u32,
     pool: *Pool,
@@ -162,10 +153,10 @@ pub const Thread = struct {
     }
 };
 
-pub fn do(arg: ?*anyopaque) callconv(.C) void {
+pub fn do(arg: ?*anyopaque) void {
     var self = @ptrCast(*Thread, @alignCast(@alignOf(Thread), arg));
     
-    std.log.info("Working on thread ID: {}", .{std.Thread.getCurrentId()});
+    //std.log.info("Working on thread ID: {}", .{std.Thread.getCurrentId()});
 
     //Mark as alive
     self.pool.thread_count_lock.lock();
