@@ -19,7 +19,7 @@ pub const Semaphore = struct {
         
         self.mutex = std.Thread.Mutex{};
         self.cond = std.Thread.Condition{};
-        self.*.v = value;
+        self.v = value;
     }
 
     pub fn reset(self: *Semaphore) void {
@@ -28,24 +28,24 @@ pub const Semaphore = struct {
 
     pub fn post(self: *Semaphore) void {
         self.mutex.lock();
-        self.*.v = 1;
+        self.v = 1;
         self.cond.signal();
         self.mutex.unlock();
     }
 
     pub fn post_all(self: *Semaphore) void {
         self.mutex.lock();
-        self.*.v = 1;
+        self.v = 1;
         self.cond.broadcast();
         self.mutex.unlock();
     }
 
     pub fn wait(self: *Semaphore) void {
         self.mutex.lock();
-        while(self.*.v != 1)
+        while(self.v != 1)
             self.cond.wait(&self.mutex);
 
-        self.*.v = 0;
+        self.v = 0;
         self.cond.signal();
         self.mutex.unlock();
     }
@@ -66,70 +66,70 @@ pub const JobQueue = struct {
 
     pub fn init() *JobQueue {
         var queue = allocator.create(JobQueue) catch unreachable;
-        queue.*.len.? = 0;
-        queue.*.front = null;
-        queue.*.rear = null;
+        queue.len.? = 0;
+        queue.front = null;
+        queue.rear = null;
 
-        queue.*.has_jobs = allocator.create(Semaphore) catch unreachable;
-        queue.*.rwmutex = std.Thread.Mutex{};
-        queue.*.has_jobs.init(0);
+        queue.has_jobs = allocator.create(Semaphore) catch unreachable;
+        queue.rwmutex = std.Thread.Mutex{};
+        queue.has_jobs.init(0);
 
         return queue;
     }
 
     pub fn clear(self: *JobQueue) void {
-        while(self.*.len.? > 0)
+        while(self.len.? > 0)
             allocator.destroy(self.pull().?);
 
-        self.*.front = null;
-        self.*.rear = null;
-        self.*.has_jobs.reset();
-        self.*.len = 0;
+        self.front = null;
+        self.rear = null;
+        self.has_jobs.reset();
+        self.len = 0;
     }
 
     pub fn push(self: *JobQueue, newjob: ?*Job) void {
-        self.*.rwmutex.lock();
+        self.rwmutex.lock();
         newjob.?.prev = null;
 
-        switch(self.*.len.?) {
+        switch(self.len.?) {
             0 => {
-                self.*.front = newjob;
-                self.*.rear = newjob;
+                self.front = newjob;
+                self.rear = newjob;
             },
             else => {
-                self.*.rear.?.prev = newjob;
-                self.*.rear = newjob;
+                self.rear.?.prev = newjob;
+                self.rear = newjob;
             }
         }
-        self.*.len.? += 1;
-        self.*.has_jobs.*.post();
-        self.*.rwmutex.unlock();
+        self.len.? += 1;
+        self.has_jobs.post();
+        self.rwmutex.unlock();
     }
 
     pub fn pull(self: *JobQueue) ?*Job {
-        self.*.rwmutex.lock();
-        var job = self.*.front;
+        self.rwmutex.lock();
+        var job = self.front;
 
-        switch(self.*.len.?) {
+        switch(self.len.?) {
             0 => {},
             1 => {
-                self.*.front = null;
-                self.*.rear = null;
-                self.*.len = 0;
+                self.front = null;
+                self.rear = null;
+                self.len = 0;
             },
             else => {
-                self.*.front = job.?.prev;
-                self.*.len.? -= 1;
-                self.*.has_jobs.post();
+                self.front = job.?.prev;
+                self.len.? -= 1;
+                self.has_jobs.post();
             }
         }
-        self.*.rwmutex.unlock();
+        self.rwmutex.unlock();
         return job;
     }
 
     pub fn destroy(self: *JobQueue) void {
         self.clear();
-        allocator.destroy(self.*.has_jobs);
+        allocator.destroy(self.has_jobs);
     }
 };
 
@@ -168,41 +168,41 @@ pub fn do(arg: ?*anyopaque) callconv(.C) void {
     std.log.info("Working on thread ID: {}", .{std.Thread.getCurrentId()});
 
     //Mark as alive
-    self.*.pool.*.thread_count_lock.lock();
-    self.*.pool.*.num_threads_alive += 1;
-    self.*.pool.*.thread_count_lock.unlock();
+    self.pool.thread_count_lock.lock();
+    self.pool.num_threads_alive += 1;
+    self.pool.thread_count_lock.unlock();
 
     while(threads_keepalive > 0) {
         while(threads_on_hold > 0)
             std.time.sleep(0);
         
-        self.*.pool.*.jobqueue.*.has_jobs.wait();
+        self.pool.jobqueue.has_jobs.wait();
 
         if(threads_keepalive > 0) {
 
             //Mark as working
-            self.*.pool.*.thread_count_lock.lock();
-            self.*.pool.*.num_threads_working += 1;
-            self.*.pool.*.thread_count_lock.unlock();
+            self.pool.thread_count_lock.lock();
+            self.pool.num_threads_working += 1;
+            self.pool.thread_count_lock.unlock();
 
-            var job = self.*.pool.*.jobqueue.pull();
+            var job = self.pool.jobqueue.pull();
             if(job != null) {
                 @call(.{}, job.?.func, .{job.?.arg});
                 allocator.destroy(job.?);
             }
             //Finish working
-            self.*.pool.*.thread_count_lock.lock();
-            self.*.pool.*.num_threads_working -= 1;
-            if (self.*.pool.*.num_threads_working < 1) {
-                self.*.pool.*.threads_idle.signal();
+            self.pool.thread_count_lock.lock();
+            self.pool.num_threads_working -= 1;
+            if (self.pool.num_threads_working < 1) {
+                self.pool.threads_idle.signal();
             }
-            self.*.pool.*.thread_count_lock.unlock();
+            self.pool.thread_count_lock.unlock();
         }
     }
 
-    self.*.pool.*.thread_count_lock.lock();
-    self.*.pool.*.num_threads_alive -= 1;
-    self.*.pool.*.thread_count_lock.unlock();
+    self.pool.thread_count_lock.lock();
+    self.pool.num_threads_alive -= 1;
+    self.pool.thread_count_lock.unlock();
 }
 
 pub const Pool = struct {
@@ -222,24 +222,24 @@ pub const Pool = struct {
 
         //Create new pool
         var pool = allocator.create(Pool) catch unreachable; 
-        pool.*.num_threads_alive = 0;
-        pool.*.num_threads_working = 0;
+        pool.num_threads_alive = 0;
+        pool.num_threads_working = 0;
 
         //Create job queue
-        pool.*.jobqueue = JobQueue.init();
+        pool.jobqueue = JobQueue.init();
 
         //Create threads
-        pool.*.threads = allocator.alloc(Thread, num_threads) catch unreachable;
+        pool.threads = allocator.alloc(Thread, num_threads) catch unreachable;
 
-        pool.*.thread_count_lock = std.Thread.Mutex{};
-        pool.*.threads_idle = std.Thread.Condition{};
+        pool.thread_count_lock = std.Thread.Mutex{};
+        pool.threads_idle = std.Thread.Condition{};
 
         var n: u32 = 0;
         while(n < num_threads) : (n += 1) {
-            pool.*.threads[n] = pool.*.threads[n].init(pool, n).*;
+            pool.threads[n] = pool.threads[n].init(pool, n).*;
         }
         
-        while(pool.*.num_threads_alive != num_threads) {
+        while(pool.num_threads_alive != num_threads) {
             //
         }
 
@@ -249,8 +249,8 @@ pub const Pool = struct {
     pub fn add_work(self: *Pool, func: anytype, arg: anytype) u32 {
         var newjob: *Job = allocator.create(Job) catch unreachable;
 
-        newjob.*.func = func;
-        newjob.*.arg = arg;
+        newjob.func = func;
+        newjob.arg = arg;
 
         self.jobqueue.push(newjob);
 
@@ -259,7 +259,7 @@ pub const Pool = struct {
 
     pub fn wait(self: *Pool) void {
         self.thread_count_lock.lock();
-        while(self.*.jobqueue.len.? > 0 or self.*.num_threads_working > 0) {
+        while(self.jobqueue.len.? > 0 or self.num_threads_working > 0) {
             self.threads_idle.wait(&self.thread_count_lock);
         }
         self.thread_count_lock.unlock();
@@ -271,7 +271,7 @@ pub const Pool = struct {
         var time_elapsed = std.time.milliTimestamp();
         const TIMEOUT = time_elapsed + 1000;
 
-        while(time_elapsed < TIMEOUT and self.*.num_threads_alive > 0) {
+        while(time_elapsed < TIMEOUT and self.num_threads_alive > 0) {
             self.jobqueue.has_jobs.post_all();
             time_elapsed = std.time.milliTimestamp();
         }
@@ -298,6 +298,6 @@ pub const Pool = struct {
     }
 
     pub fn num_threads_working(self: *Pool) u32 {
-        return self.*.num_threads_working;
+        return self.num_threads_working;
     }
 };
