@@ -21,7 +21,7 @@ pub fn main() void {
         subsets[i].start = next;
         subsets[i].end = subsets[i].start + num_additions_per_task - 1;
         next = subsets[i].end + 1;
-        try pool.add_work(addNumberSubset, &subsets[i]);
+        _ = pool.add_work(&addNumberSubset, @ptrCast(*anyopaque, &subsets[i]));
     }
 
     pool.pause();
@@ -36,7 +36,7 @@ pub fn main() void {
     elapsed = std.time.milliTimestamp() - elapsed;
     log.info("triangle: {} result: {} elapsed: {}ms", .{ (triangle_num * (triangle_num + 1) / 2), result, elapsed});
 
-    assert((triangle_num * (triangle_num + 1) / 2) == result);
+    
 }
 
 const NumberSubset = struct {
@@ -45,7 +45,8 @@ const NumberSubset = struct {
     total: u64,
 };
 
-pub fn addNumberSubset(subset: *NumberSubset) void { //return type must be void
+pub fn addNumberSubset(arg: *anyopaque) void {
+    var subset = @ptrCast(*NumberSubset, @alignCast(@alignOf(NumberSubset), arg));
     subset.total = 0;
     while (subset.start <= subset.end) : (subset.start += 1) {
         subset.total += subset.start + 1;
