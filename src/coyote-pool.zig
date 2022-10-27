@@ -1,5 +1,6 @@
 const std = @import("std");
 const c = std.c;
+const assert = std.debug.assert;
 
 var threads_keepalive: u32 = undefined;
 var threads_on_hold: u32 = undefined;
@@ -53,7 +54,7 @@ pub const Semaphore = struct {
 
 pub const Job = struct {
     prev: ?*Job,
-    func: *const fn (*anyopaque) void,
+    func: *const anyopaque,
     arg: *anyopaque,
 };
 
@@ -66,7 +67,7 @@ pub const JobQueue = struct {
 
     pub fn init() *JobQueue {
         var queue = allocator.create(JobQueue) catch unreachable;
-        queue.len.? = 0;
+        queue.len = 0;
         queue.front = null;
         queue.rear = null;
 
@@ -178,7 +179,7 @@ pub fn do(arg: ?*anyopaque) void {
 
             var job = self.pool.jobqueue.pull();
             if(job != null) {
-                @call(.{}, job.?.func, .{job.?.arg});
+                callVarArgs(void, job.?.func, .{job.?.arg});
                 allocator.destroy(job.?);
             }
             //Finish working
@@ -237,15 +238,13 @@ pub const Pool = struct {
         return pool;
     }
 
-    pub fn add_work(self: *Pool, func: anytype, arg: anytype) u32 {
+    pub fn add_work(self: *Pool, func: anytype, arg: anytype) !void {
         var newjob: *Job = allocator.create(Job) catch unreachable;
 
-        newjob.func = func;
+        newjob.func = @ptrCast(*const anyopaque, &func);
         newjob.arg = arg;
 
         self.jobqueue.push(newjob);
-
-        return 0;
     }
 
     pub fn wait(self: *Pool) void {
@@ -292,3 +291,186 @@ pub const Pool = struct {
         return self.num_threads_working;
     }
 };
+
+//varargs thanks to https://github.com/suirad/zig-varargs
+const VA_Errors = error{
+    CountUninitialized,
+    NoMoreArgs,
+};
+
+pub inline fn callVarArgs(comptime T: type, func: *const anyopaque, args: anytype) T {
+    // comptime: validate args
+    comptime {
+        if (@bitSizeOf(T) > @bitSizeOf(usize)) {
+            @compileError("Return type is larger than usize: " ++ @typeName(T));
+        }
+        const args_info = @typeInfo(@TypeOf(args));
+        if (args_info != .Struct or args_info.Struct.is_tuple == false) {
+            @compileError("Expected args to be a tuple");
+        }
+    }
+
+    // comptime: accounting
+    // count number of fp and gp args so we can push them on the stack
+    //      if needed and in reverse order
+    // also do type checking
+    comptime var gp_args = 0;
+    comptime var fp_args = 0;
+
+    comptime {
+        var index = args.len;
+        while (index > 0) : (index -= 1) {
+            const arg_type = @TypeOf(args[index - 1]);
+            const arg_info = @typeInfo(arg_type);
+            switch (arg_info) {
+                .Int, .ComptimeInt, .Optional, .Pointer => {
+                    if (@bitSizeOf(arg_type) > @bitSizeOf(usize)) {
+                        @compileError("Arg type is larger than usize: " ++ @typeName(arg_type));
+                    } else if (arg_info == .Optional) {
+                        const child = arg_info.Optional.child;
+                        const child_info = @typeInfo(child);
+                        if (child_info != .Pointer) {
+                            @compileError("Optional args should only be pointers");
+                        }
+                    }
+
+                    gp_args += 1;
+                },
+
+                .Float => fp_args += 1,
+
+                else => @compileError("Unsupported arg type: " ++ @typeName(arg_type)),
+            }
+        }
+    }
+
+    const fp_total: usize = fp_args;
+    comptime var stack_growth: usize = 0;
+    comptime var index = args.len;
+
+    // reverse loop of args so you can push later args onto the stack in order
+    inline while (index > 0) : (index -= 1) {
+        const varg = args[index - 1];
+        const arg_info = @typeInfo(@TypeOf(varg));
+        switch (arg_info) {
+            .Int, .ComptimeInt, .Optional, .Pointer => {
+                const arg: usize = if (arg_info == .Optional or arg_info == .Pointer)
+                    @as(usize, @ptrToInt(varg))
+                else
+                    @as(usize, varg);
+
+                pushInt(gp_args, arg);
+                if (gp_args > 6)
+                    stack_growth += @sizeOf(usize);
+                gp_args -= 1;
+            },
+
+            .Float => {
+                const arg = @floatCast(f64, varg);
+                pushFloat(fp_args, arg);
+                fp_args -= 1;
+            },
+
+            else => @compileError("Unsupported arg type: " ++ @typeName(varg)),
+        }
+    }
+
+    // call fn
+    asm volatile ("call *(%[func])"
+        :
+        : [func] "{r10}" (&func),
+          [fp_total] "{rax}" (fp_total),
+    );
+
+    // realign stack
+    if (stack_growth > 0) {
+        asm volatile ("add %%r10, %%rsp"
+            :
+            : [stack_growth] "{r10}" (stack_growth),
+        );
+    }
+
+    // handle return type
+    if (T == void) {
+        return;
+    }
+
+    const ret = asm volatile (""
+        : [ret] "={rax}" (-> T),
+    );
+
+    return ret;
+}
+
+inline fn pushInt(comptime index: usize, arg: usize) void {
+    switch (index) {
+        1 => asm volatile (""
+            :
+            : [arg] "{rdi}" (arg),
+        ),
+        2 => asm volatile (""
+            :
+            : [arg] "{rsi}" (arg),
+        ),
+        3 => asm volatile (""
+            :
+            : [arg] "{rdx}" (arg),
+        ),
+        4 => asm volatile (""
+            :
+            : [arg] "{rcx}" (arg),
+        ),
+        5 => asm volatile (""
+            :
+            : [arg] "{r8}" (arg),
+        ),
+        6 => asm volatile (""
+            :
+            : [arg] "{r9}" (arg),
+        ),
+        else => {
+            asm volatile ("push %%r10"
+                :
+                : [arg] "{r10}" (arg),
+            );
+        },
+    }
+}
+
+inline fn pushFloat(comptime index: usize, arg: f64) void {
+    switch (index) {
+        1 => asm volatile (""
+            :
+            : [arg] "{xmm0}" (arg),
+        ),
+        2 => asm volatile (""
+            :
+            : [arg] "{xmm1}" (arg),
+        ),
+        3 => asm volatile (""
+            :
+            : [arg] "{xmm2}" (arg),
+        ),
+        4 => asm volatile (""
+            :
+            : [arg] "{xmm3}" (arg),
+        ),
+        5 => asm volatile (""
+            :
+            : [arg] "{xmm4}" (arg),
+        ),
+        6 => asm volatile (""
+            :
+            : [arg] "{xmm5}" (arg),
+        ),
+        7 => asm volatile (""
+            :
+            : [arg] "{xmm6}" (arg),
+        ),
+        8 => asm volatile (""
+            :
+            : [arg] "{xmm7}" (arg),
+        ),
+        else => @panic("TODO: stack floats"),
+    }
+}

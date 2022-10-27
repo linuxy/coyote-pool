@@ -8,6 +8,7 @@ pub fn build(b: *std.build.Builder) void {
     const exe = b.addExecutable("triangle", "examples/triangle.zig");
     exe.setBuildMode(mode);
     exe.addPackage(poolPkg);
+    exe.use_stage1 = false;
     exe.linkLibC();
     exe.install();
 
